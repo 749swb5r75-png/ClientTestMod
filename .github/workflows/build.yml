@@ -1,6 +1,5 @@
 name: Build DLL
 
-# Trigger workflow on push to main branch
 on:
   push:
     branches:
@@ -8,12 +7,11 @@ on:
 
 jobs:
   build:
-    name: Build C# DLL
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Get repository code
-      - name: Checkout repository
+      # Step 1: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v3
 
       # Step 2: Setup .NET SDK
@@ -22,13 +20,13 @@ jobs:
         with:
           dotnet-version: 6.0.x
 
-      # Step 3: Build the project
+      # Step 3: Build the C# project
       - name: Build DLL
         run: dotnet build ClientTestMenu.csproj -c Release
 
-      # Step 4: Upload DLL as artifact
-      - name: Upload compiled DLL
-        uses: actions/upload-artifact@v3
+      # Step 4: Upload compiled DLL as artifact
+      - name: Upload DLL
+        uses: actions/upload-artifact@v4
         with:
           name: ClientTestDLL
           path: ClientTestMenu/bin/Release/net6.0/*.dll
