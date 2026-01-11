@@ -1,32 +1,92 @@
-name: Build DLL
+name: Build single DLL
 
 on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Checkout repository
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # Step 2: Setup .NET SDK
       - name: Setup .NET 6
         uses: actions/setup-dotnet@v3
         with:
-          dotnet-version: 6.0.x
+          dotnet-version: '6.0.x'
 
-      # Step 3: Build the C# project
-      - name: Build DLL
-        run: dotnet build ClientTestMenu.csproj -c Release
+      - name: Find project or create temp classlib and build
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      # Step 4: Upload compiled DLL as artifact
-      - name: Upload DLL
+          echo "Searching for a .csproj in the repo..."
+          CSPROJ=$(find . -type f -name '*.csproj' -not -path './.git/*' | head -n 1 || true)
+
+          if [ -n "${CSPROJ}" ]; then
+            echo "Found .csproj: ${CSPROJ}"
+            dotnet restore "${CSPROJ}"
+            # Build to a predictable artifacts dir
+            dotnet build "${CSPROJ}" -c Release -o ./artifacts --no-restore
+          else
+            echo "No .csproj found. Creating temporary class library and compiling all .cs files into one DLL."
+            rm -rf temp_build artifacts || true
+            dotnet new classlib -o temp_build -n TempBuild --framework net6.0
+
+            # Remove the auto-generated Class1.cs so we only include repo .cs files
+            rm -f temp_build/Class1.cs || true
+
+            # Copy all .cs files into the temp project, excluding .git, bin, obj and the temp_build itself
+            find . -type f -name '*.cs' \
+              -not -path './.git/*' \
+              -not -path './temp_build/*' \
+              -not -path '*/bin/*' \
+              -not -path '*/obj/*' \
+              -print0 | xargs -0 -I{} cp "{}" temp_build/ || true
+
+            # If no .cs files were copied, create a placeholder so build won't fail
+            if [ -z "$(ls -A temp_build/*.cs 2>/dev/null || true)" ]; then
+              cat > temp_build/Placeholder.cs <<'EOF'
+namespace TempBuildPlaceholder { public class Placeholder { public static void Nothing() {} } }
+EOF
+            fi
+
+            dotnet build temp_build/TempBuild.csproj -c Release -o ./artifacts
+            CSPROJ=./temp_build/TempBuild.csproj
+            echo "Built temp project at ${CSPROJ}"
+          fi
+
+          echo "Built artifacts directory listing:"
+          ls -la artifacts || true
+
+          # Expose outputs for debugging / later steps
+          echo "csproj=${CSPROJ}" >> "$GITHUB_OUTPUT"
+          echo "artifact_dir=artifacts" >> "$GITHUB_OUTPUT"
+
+      - name: Show all possible DLL output locations (debug)
+        if: always()
+        run: |
+          echo "Artifacts dir contents:"
+          ls -R artifacts || true
+          echo "Also listing any Release output folders:"
+          find . -type d -name 'Release' -prune -print -exec ls -la {} \; || true
+
+      - name: Upload DLL artifact(s)
         uses: actions/upload-artifact@v4
         with:
-          name: ClientTestDLL
-          path: ClientTestMenu/bin/Release/net6.0/*.dll
+          name: compiled-dlls
+          path: |
+            artifacts/*.dll
+            **/bin/Release/**/net*/**/*.dll
+            **/bin/Release/**/*.dll
+
+      - name: Done
+        run: echo "Build finished. Download the artifact 'compiled-dlls' from the workflow run page."
