@@ -9,6 +9,9 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -30,21 +33,19 @@ jobs:
 
           echo "Searching for a .csproj in the repo..."
           CSPROJ=$(find . -type f -name '*.csproj' -not -path './.git/*' | head -n 1 || true)
+          echo "DEBUG: CSPROJ='$CSPROJ'"
 
-          if [ -n "${CSPROJ}" ]; then
-            echo "Found .csproj: ${CSPROJ}"
-            dotnet restore "${CSPROJ}"
-            # Build to a predictable artifacts dir
-            dotnet build "${CSPROJ}" -c Release -o ./artifacts --no-restore
+          if [ -n "$CSPROJ" ]; then
+            echo "Found .csproj: $CSPROJ"
+            dotnet restore "$CSPROJ"
+            dotnet build "$CSPROJ" -c Release -o ./artifacts --no-restore
           else
             echo "No .csproj found. Creating temporary class library and compiling all .cs files into one DLL."
             rm -rf temp_build artifacts || true
             dotnet new classlib -o temp_build -n TempBuild --framework net6.0
-
-            # Remove the auto-generated Class1.cs so we only include repo .cs files
             rm -f temp_build/Class1.cs || true
 
-            # Copy all .cs files into the temp project, excluding .git, bin, obj and the temp_build itself
+            # Copy all .cs files into the temp project (exclude .git, temp_build, bin and obj)
             find . -type f -name '*.cs' \
               -not -path './.git/*' \
               -not -path './temp_build/*' \
@@ -52,41 +53,80 @@ jobs:
               -not -path '*/obj/*' \
               -print0 | xargs -0 -I{} cp "{}" temp_build/ || true
 
-            # If no .cs files were copied, create a placeholder so build won't fail
             if [ -z "$(ls -A temp_build/*.cs 2>/dev/null || true)" ]; then
               cat > temp_build/Placeholder.cs <<'EOF'
 namespace TempBuildPlaceholder { public class Placeholder { public static void Nothing() {} } }
 EOF
             fi
 
-            dotnet build temp_build/TempBuild.csproj -c Release -o ./artifacts
+            dotnet restore ./temp_build/TempBuild.csproj || true
+            dotnet build ./temp_build/TempBuild.csproj -c Release -o ./artifacts
             CSPROJ=./temp_build/TempBuild.csproj
-            echo "Built temp project at ${CSPROJ}"
+            echo "Built temp project at $CSPROJ"
           fi
 
-          echo "Built artifacts directory listing:"
+          echo "Artifacts directory listing:"
           ls -la artifacts || true
 
-          # Expose outputs for debugging / later steps
-          echo "csproj=${CSPROJ}" >> "$GITHUB_OUTPUT"
+          echo "csproj=$CSPROJ" >> "$GITHUB_OUTPUT"
           echo "artifact_dir=artifacts" >> "$GITHUB_OUTPUT"
 
-      - name: Show all possible DLL output locations (debug)
+      - name: Show possible output locations (debug)
         if: always()
         run: |
-          echo "Artifacts dir contents:"
+          echo "Artifacts contents:"
           ls -R artifacts || true
-          echo "Also listing any Release output folders:"
+          echo "Release folders:"
           find . -type d -name 'Release' -prune -print -exec ls -la {} \; || true
 
-      - name: Upload DLL artifact(s)
-        uses: actions/upload-artifact@v4
+      - name: Find built DLL
+        id: find_dll
+        shell: bash
+        run: |
+          set -euo pipefail
+          # First look in the artifacts output dir
+          DLL=$(find artifacts -type f -name '*.dll' -print -quit || true)
+          # If not found, search for common Release output folders
+          if [ -z "$DLL" ]; then
+            DLL=$(find . -type f \( -path '*/bin/Release/**/net*/*.dll' -o -path './artifacts/*.dll' \) -print -quit || true)
+          fi
+          if [ -z "$DLL" ]; then
+            echo "No DLL found. Listing likely locations for debugging:"
+            find . -type f -name '*.dll' -print || true
+            exit 1
+          fi
+          echo "Found DLL: $DLL"
+          echo "dll_path=$DLL" >> "$GITHUB_OUTPUT"
+          echo "asset_name=$(basename "$DLL")" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release (for direct DLL download)
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: compiled-dlls
-          path: |
-            artifacts/*.dll
-            **/bin/Release/**/net*/**/*.dll
-            **/bin/Release/**/*.dll
+          tag_name: build-${{ github.run_id }}
+          release_name: Build ${{ github.run_number }} (run ${{ github.run_id }})
+          body: "Automated build release for run ${{ github.run_id }} — contains compiled DLL."
+          draft: false
+          prerelease: false
+
+      - name: Upload DLL as release asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.find_dll.outputs.dll_path }}
+          asset_name: ${{ steps.find_dll.outputs.asset_name }}
+          asset_content_type: application/octet-stream
+
+      - name: Cleanup (optional)
+        if: always()
+        run: |
+          echo "Release created: ${{ steps.create_release.outputs.html_url }}"
+          echo "Asset uploaded: ${{ steps.find_dll.outputs.asset_name }}"
 
       - name: Done
-        run: echo "Build finished. Download the artifact 'compiled-dlls' from the workflow run page."
+        if: success()
+        run: echo "Build + release complete. Visit the release page to download the DLL: ${{ steps.create_release.outputs.html_url }}"
