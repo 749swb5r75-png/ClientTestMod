@@ -1,0 +1,28 @@
+name: Build DLL
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: 6.0.x
+
+      - name: Build C# DLL
+        run: dotnet build ClientTestMenu.csproj -c Release
+
+      - name: Upload DLL artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ClientTestDLL
+          path: bin/Release/net6.0/*.dll
